@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Chat Privé - WhatsApp Like</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: Arial, sans-serif; background: #ece5dd; margin: 0; }
+    #app { max-width: 400px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 0 10px #bbb; padding: 0 0 20px 0; }
+    .header { background: #075e54; color: white; padding: 15px; border-radius: 8px 8px 0 0; text-align: center; }
+    #myCode { background: #e0f7fa; color: #075e54; padding: 10px; border-radius: 5px; margin: 10px 20px; text-align: center; font-weight: bold;}
+    .add-friend { display: flex; gap: 10px; padding: 10px 20px; }
+    .add-friend input { flex: 1; padding: 8px; border: 1px solid #bbb; border-radius: 4px; }
+    .add-friend button { background: #25d366; color: white; border: none; border-radius: 4px; padding: 8px 15px; cursor: pointer; }
+    #friends { margin: 10px 20px; }
+    #friendsList { list-style: none; padding: 0; }
+    #friendsList li { margin-bottom: 4px; }
+    #chat { border: 1px solid #eee; border-radius: 6px; margin: 10px 20px; min-height: 200px; background: #fafafa; padding: 10px; max-height: 300px; overflow-y: auto;}
+    .message { margin: 5px 0; }
+    .mine { text-align: right; color: #075e54; }
+    .other { text-align: left; color: #222; }
+    #sendMsg { display: flex; gap: 8px; margin: 10px 20px 0 20px; }
+    #sendMsg input { flex: 1; padding: 8px; border: 1px solid #bbb; border-radius: 4px; }
+    #sendMsg button { background: #075e54; color: white; border: none; border-radius: 4px; padding: 8px 16px; cursor: pointer; }
+    .friend-active { font-weight: bold; color: #25d366; }
+  </style>
+  <script src="https://cdn.ably.io/lib/ably.min-1.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div class="header">
+      <h2>Chat Privé</h2>
+    </div>
+    <div id="myCode">Code personnel: <span id="myUserCode"></span></div>
+    <div class="add-friend">
+      <input type="text" id="friendCodeInput" placeholder="Code de l'ami à ajouter" maxlength="12">
+      <button onclick="addFriend()">Ajouter</button>
+    </div>
+    <div id="friends">
+      <strong>Amis :</strong>
+      <ul id="friendsList"></ul>
+    </div>
+    <div id="chat">
+      <div id="chatBox"></div>
+    </div>
+    <form id="sendMsg" onsubmit="sendMsg(event)">
+      <input type="text" id="msgInput" placeholder="Écrire un message..." autocomplete="off" required>
+      <button type="submit">Envoyer</button>
+    </form>
+  </div>
+  <script>
+    // --- CONFIG ---
+    const ABLY_KEY = "zE6E3A.v25uuA:8W5ZxRjegT2mH0Fg2nxwkAzkq7TfZ6T30ndOMpvbizA";
+    // --- END CONFIG ---
+
+    // Simple code generation (could be UUID, here 8 digits random)
+    function generateCode() {
+      return Math.random().toString(36).substring(2, 10).toUpperCase();
+    }
+
+    // Local storage helpers
+    function save(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
+    function load(key, def) { try { return JSON.parse(localStorage.getItem(key)) || def; } catch { return def; } }
+
+    // User initialization
+    let myUserCode = load('chat_myCode');
+    if (!myUserCode) {
+      myUserCode = generateCode();
+      save('chat_myCode', myUserCode);
+    }
+    document.getElementById('myUserCode').textContent = myUserCode;
+
+    // Friends management
+    let friends = load('chat_friends', []);
+    let activeFriend = friends[0] || null;
+
+    function updateFriendsUI() {
+      const ul = document.getElementById('friendsList');
+      ul.innerHTML = '';
+      friends.forEach(code => {
+        const li = document.createElement('li');
+        li.textContent = code;
+        if (code === activeFriend) {
+          li.className = 'friend-active';
+        }
+        li.onclick = () => { activeFriend = code; updateFriendsUI(); loadChat(); };
+        ul.appendChild(li);
+      });
+      if (!activeFriend && friends.length) {
+        activeFriend = friends[0];
+        updateFriendsUI();
+      }
+    }
+
+    function addFriend() {
+      const val = document.getElementById('friendCodeInput').value.trim().toUpperCase();
+      if (val && !friends.includes(val) && val !== myUserCode) {
+        friends.push(val);
+        save('chat_friends', friends);
+        updateFriendsUI();
+      }
+      document.getElementById('friendCodeInput').value = '';
+    }
+
+    // Chat logic with Ably
+    var ably = new Ably.Realtime(ABLY_KEY);
+
+    // Each private chat is a channel with name 'chat-<CODE1>-<CODE2>' (sorted)
+    function getChannelName(userA, userB) {
+      return 'chat-' + [userA, userB].sort().join('-');
+    }
+
+    // In-memory chat cache
+    let chatHistory = {};
+
+    function loadChat() {
+      document.getElementById('chatBox').innerHTML = '';
+      if (!activeFriend) return;
+      const chanName = getChannelName(myUserCode, activeFriend);
+      if (!chatHistory[chanName]) chatHistory[chanName] = [];
+      chatHistory[chanName].forEach(msg => appendMsg(msg));
+    }
+
+    function appendMsg(msg) {
+      const div = document.createElement('div');
+      div.className = 'message ' + (msg.from === myUserCode ? 'mine' : 'other');
+      div.textContent = (msg.from === myUserCode ? "Moi: " : "Lui/Elle: ") + msg.text;
+      document.getElementById('chatBox').appendChild(div);
+      document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+    }
+
+    // Subscribe to all friends channels
+    function subscribeAll() {
+      friends.forEach(code => {
+        if (code === myUserCode) return;
+        const chanName = getChannelName(myUserCode, code);
+        const channel = ably.channels.get(chanName);
+        channel.subscribe('msg', function(message) {
+          if (!chatHistory[chanName]) chatHistory[chanName] = [];
+          chatHistory[chanName].push(message.data);
+          // Save only last 100 messages per friend in localStorage
+          chatHistory[chanName] = chatHistory[chanName].slice(-100);
+          save('chat_history', chatHistory);
+          if (code === activeFriend) appendMsg(message.data);
+        });
+      });
+    }
+
+    // Restore chat history from localStorage
+    chatHistory = load('chat_history', {});
+    setTimeout(loadChat, 200);
+
+    // Add new friend and subscribe
+    function reSubscribe() {
+      subscribeAll();
+      loadChat();
+    }
+
+    // Send message
+    function sendMsg(e) {
+      e.preventDefault();
+      const msg = document.getElementById('msgInput').value.trim();
+      if (!activeFriend || !msg) return;
+      const chanName = getChannelName(myUserCode, activeFriend);
+      const channel = ably.channels.get(chanName);
+      const message = { from: myUserCode, text: msg, ts: Date.now() };
+      channel.publish('msg', message);
+      if (!chatHistory[chanName]) chatHistory[chanName] = [];
+      chatHistory[chanName].push(message);
+      chatHistory[chanName] = chatHistory[chanName].slice(-100);
+      save('chat_history', chatHistory);
+      appendMsg(message);
+      document.getElementById('msgInput').value = '';
+    }
+
+    // Initial UI
+    updateFriendsUI();
+    subscribeAll();
+
+    // On addFriend, re-subscribe
+    window.addFriend = function() {
+      addFriend();
+      reSubscribe();
+    };
+    window.sendMsg = sendMsg;
+  </script>
+</body>
+</html>
